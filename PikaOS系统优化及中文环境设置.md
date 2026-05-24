@@ -12,14 +12,16 @@
 ## 目录
 
 1. [内存与交换优化](#1-内存与交换优化)
-2. [服务精简](#2-服务精简)
-3. [环境变量清理](#3-环境变量清理)
-4. [fcitx5 输入法配置](#4-fcitx5-输入法配置)
-5. [NVIDIA 配置](#5-nvidia-配置)
-6. [终端配置（foot）](#6-终端配置foot)
-7. [字体配置（CJK 回退优先级）](#7-字体配置cjk-回退优先级)
-8. [Shell 配置](#8-shell-配置)
-9. [附录：更改汇总](#9-附录更改汇总)
+2. [内核参数调优](#2-内核参数调优)
+3. [服务精简](#3-服务精简)
+4. [日志优化](#4-日志优化)
+5. [环境变量清理](#5-环境变量清理)
+6. [fcitx5 输入法配置](#6-fcitx5-输入法配置)
+7. [NVIDIA 配置](#7-nvidia-配置)
+8. [终端配置（foot）](#8-终端配置foot)
+9. [字体配置（CJK 回退优先级）](#9-字体配置cjk-回退优先级)
+10. [Shell 配置](#10-shell-配置)
+11. [附录：更改汇总](#11-附录更改汇总)
 
 ---
 
@@ -77,9 +79,39 @@ sudo systemctl restart zramswap
 
 ---
 
-## 2. 服务精简
+## 2. 内核参数调优
 
-### 2.1 禁用 Evolution 后台服务
+### 2.1 vm.vfs_cache_pressure
+
+控制内核回收 dentry/inode 缓存（文件系统元数据）的倾向。默认值 100 表示内核以正常速率回收缓存；降低该值会让内核尽可能多地保留缓存。
+
+NVMe SSD + 16GB RAM 场景下，设为 **50** 可减少重复 disk I/O，提升文件操作响应速度。
+
+```bash
+# 立即生效
+sudo sysctl -w vm.vfs_cache_pressure=50
+
+# 持久化（追加到已有 sysctl 文件或新建）
+echo "vm.vfs_cache_pressure=50" | sudo tee /etc/sysctl.d/99-cache.conf
+```
+
+### 2.2 kernel.numa_balancing
+
+NUMA 自动平衡用于多路 CPU 系统。单 socket 平台（如 i5-6500）完全不需要，关闭可节省少量后台开销。
+
+```bash
+# 立即生效
+sudo sysctl -w kernel.numa_balancing=0
+
+# 持久化
+echo "kernel.numa_balancing=0" | sudo tee -a /etc/sysctl.d/99-cache.conf
+```
+
+---
+
+## 3. 服务精简
+
+### 3.1 禁用 Evolution 后台服务
 
 如不使用 GNOME Evolution 邮件客户端，可禁用其后台进程组。
 
@@ -113,7 +145,7 @@ EOF
 kill <pid_of_evolution-alarm-notify>
 ```
 
-### 2.2 Geoclue Demo Agent
+### 3.2 Geoclue Demo Agent
 
 位置服务 Demo，桌面用户通常不需要：
 
@@ -121,7 +153,7 @@ kill <pid_of_evolution-alarm-notify>
 systemctl --user mask app-geoclue-demo-agent@autostart.service
 ```
 
-### 2.3 at-spi-dbus-bus（无障碍服务）
+### 3.3 at-spi-dbus-bus（无障碍服务）
 
 如不使用屏幕阅读器等辅助功能，可禁用：
 
@@ -136,7 +168,7 @@ systemctl --user unmask at-spi-dbus-bus.service
 systemctl --user start at-spi-dbus-bus.service
 ```
 
-### 2.4 polkit-mate 认证代理
+### 3.4 polkit-mate 认证代理
 
 MATE 桌面的残留组件，COSMIC 下启动失败：
 
@@ -144,7 +176,7 @@ MATE 桌面的残留组件，COSMIC 下启动失败：
 systemctl --user mask app-polkit-mate-authentication-agent-1@autostart.service
 ```
 
-### 2.5 pika-welcome
+### 3.5 pika-welcome
 
 首次启动欢迎页，使用后无需自启：
 
@@ -152,13 +184,71 @@ systemctl --user mask app-polkit-mate-authentication-agent-1@autostart.service
 systemctl --user mask app-pika-welcome-autostart@autostart.service
 ```
 
+### 3.6 brltty（盲文设备支持）
+
+桌面用户一般不需要盲文终端支持，可安全停用：
+
+```bash
+sudo systemctl disable --now brltty
+```
+
+### 3.7 avahi-daemon（mDNS 服务）
+
+mDNS/DNS-SD 用于局域网设备发现（如打印机、网络邻居）。单机桌面无此需求：
+
+```bash
+sudo systemctl disable --now avahi-daemon
+sudo systemctl mask avahi-daemon
+```
+
+### 3.8 rsyslog（系统日志）
+
+systemd-journald 已承担日志收集功能，rsyslog 是传统 Syslog 的并行实现。对桌面用户而言，两者同时运行是冗余的：
+
+```bash
+sudo systemctl disable --now rsyslog
+```
+
+如果日后需要将日志转发到远程服务器，再重新启用即可。
+
+### 3.9 hypridle（Hyprland 空闲守护进程）
+
+hypridle 是 Hyprland 合成器的空闲管理组件，在 COSMIC 桌面下不需要（COSMIC 使用自己的空闲管理）：
+
+```bash
+systemctl --user mask hypridle
+systemctl --user stop hypridle
+```
+
 ---
 
-## 3. 环境变量清理
+## 4. 日志优化
+
+### 4.1 journald 日志上限
+
+systemd-journald 默认无日志大小上限，长时间运行后日志可能膨胀。限制在 200M 以内即可保留足够的历史记录用于排查问题。
+
+```bash
+# 追加日志大小上限
+echo "SystemMaxUse=200M" | sudo tee -a /etc/systemd/journald.conf
+
+# 重启 journald 使配置生效
+sudo systemctl restart systemd-journald
+```
+
+确认配置已生效：
+
+```bash
+journalctl --disk-usage
+```
+
+---
+
+## 5. 环境变量清理
 
 PikaOS 默认通过 `im-config` 和 `nvidia-vaapi` 设置了若干环境变量，在 Wayland + COSMIC 下部分变量已不需要。
 
-### 3.1 MOZ_DISABLE_RDD_SANDBOX
+### 5.1 MOZ_DISABLE_RDD_SANDBOX
 
 来源：`/etc/profile.d/nvidia-vaapi-env.sh`
 
@@ -175,7 +265,7 @@ sudo sed -i '/export MOZ_DISABLE_RDD_SANDBOX=1/d' /etc/profile.d/nvidia-vaapi-en
 > export MOZ_DISABLE_RDD_SANDBOX=1
 > ```
 
-### 3.2 CLUTTER_IM_MODULE
+### 5.2 CLUTTER_IM_MODULE
 
 Wayland 下 Clutter 工具库基本不再使用。`im-config` 通过 `/etc/X11/Xsession.d/70im-config_launch` 设置的 `CLUTTER_IM_MODULE=xim` 属于 X11 遗留，可以清除。
 
@@ -189,7 +279,7 @@ CLUTTER_IM_MODULE=
 EOF
 ```
 
-### 3.3 其他 Wayland 下推荐的环境变量
+### 5.3 其他 Wayland 下推荐的环境变量
 
 ```bash
 cat > ~/.config/environment.d/10-fcitx5.conf << 'EOF'
@@ -209,9 +299,9 @@ EOF
 
 ---
 
-## 4. fcitx5 输入法配置
+## 6. fcitx5 输入法配置
 
-### 4.1 基础配置
+### 6.1 基础配置
 
 fcitx5 配置文件位于 `~/.config/fcitx5/config`，核心设置：
 
@@ -248,7 +338,7 @@ Name=pinyin
 Layout=
 ```
 
-### 4.2 快捷键配置
+### 6.2 快捷键配置
 
 ```ini
 [Hotkey/TriggerKeys]         # 触发/切换输入法
@@ -275,7 +365,7 @@ Layout=
 0=Tab
 ```
 
-### 4.3 拼音配置（双拼）
+### 6.3 拼音配置（双拼）
 
 `~/.config/fcitx5/conf/pinyin.conf`：
 
@@ -331,7 +421,7 @@ QuickPhraseKey=semicolon  # ; 触发快捷短语
 VAsQuickphrase=True       # v 触发快捷输入
 ```
 
-### 4.4 自启动
+### 6.4 自启动
 
 fcitx5 的 autostart 文件在 `~/.config/autostart/fcitx5.desktop`，确保它存在：
 
@@ -352,7 +442,7 @@ NoDisplay=true
 EOF
 ```
 
-### 4.5 环境变量（Wayland 专用）
+### 6.5 环境变量（Wayland 专用）
 
 通过 `~/.config/environment.d/10-fcitx5.conf`（systemd 用户环境）统一管理：
 
@@ -373,9 +463,9 @@ CLUTTER_IM_MODULE=
 
 ---
 
-## 5. NVIDIA 配置
+## 7. NVIDIA 配置
 
-### 4.1 硬件加速相关环境变量
+### 7.1 硬件加速相关环境变量
 
 `/etc/profile.d/nvidia-vaapi-env.sh` 中保留以下内容（已移除 MOZ_DISABLE_RDD_SANDBOX）：
 
@@ -385,7 +475,7 @@ export NVD_BACKEND=direct
 export EGL_PLATFORM=wayland
 ```
 
-### 4.2 电源管理
+### 7.2 电源管理
 
 在 `/etc/modprobe.d/nvidia-options.conf` 中启用两个电源管理选项：
 
@@ -406,11 +496,11 @@ sudo update-initramfs -u
 
 ---
 
-## 6. 终端配置（foot）
+## 8. 终端配置（foot）
 
 [foot](https://codeberg.org/dnkl/foot) 是一个轻量级 Wayland 原生终端模拟器，基于 VT340 标准，支持真彩色、字体连字（ligatures）、GPU 渲染。
 
-### 6.1 推荐配置
+### 8.1 推荐配置
 
 foot 配置文件：`~/.config/foot/foot.ini`
 
@@ -519,7 +609,7 @@ font-decrease=Control+minus
 font-reset=Control+0
 ```
 
-### 6.2 foot 的 server 模式（推荐）
+### 8.2 foot 的 server 模式（推荐）
 
 foot 支持 **server/客户端 模式** —— 启动一个后台 foot 服务，新终端窗口直接连到该服务，实现瞬间启动（秒开）和共享缓存。
 
@@ -538,7 +628,7 @@ systemctl --user status foot-server.service
 
 然后在终端中运行 `foot` 开新窗口，或设置快捷键（COSMIC 设置 → 键盘 → 添加自定义快捷键）。
 
-### 6.3 中文字体注意事项
+### 8.3 中文字体注意事项
 
 foot 的多字体语法为：
 
@@ -564,7 +654,7 @@ footclient --version 2>&1
 # foot --log-level=info -o font=...
 ```
 
-### 6.4 常见问题
+### 8.4 常见问题
 
 **Q: 中文显示为方块（□□）？**
 > 缺少中文字体。安装 `fonts-noto-cjk`：
@@ -578,7 +668,7 @@ footclient --version 2>&1
 **Q: 模糊/缩放不正确？**
 > 确保 `dpi-aware=yes`，然后在 foot 中使用 `Ctrl++` / `Ctrl+-` 缩放测试。
 
-### 6.5 推荐工具：wl-clipboard（Wayland 剪贴板）
+### 8.5 推荐工具：wl-clipboard（Wayland 剪贴板）
 
 Wayland 下传统的 xclip 不可用，需要 `wl-clipboard` 提供命令行剪贴板功能。
 常用于：复制 SSH 公钥、从终端输出直接贴到 GUI 等。
@@ -601,11 +691,11 @@ wl-paste > file.txt
 
 ---
 
-## 7. 字体配置（CJK 回退优先级）
+## 9. 字体配置（CJK 回退优先级）
 
 > foot 终端的多字体已在上一节配置，本节主要针对**桌面环境**（GTK/Qt 应用等）的 CJK 字体回退。
 
-### 7.1 CJK 字体回退优先级
+### 9.1 CJK 字体回退优先级
 
 通过 fontconfig 配置文件 `~/.config/fontconfig/fonts.conf` 设定字体回退顺序：
 
@@ -664,11 +754,13 @@ mkdir -p ~/.config/fontconfig
 fc-cache -fv
 ```
 
+> **说明**: GTK 系统界面字体保持默认 `Open Sans` 即可，CJK 字形由 fontconfig 自动回退到 Noto Sans CJK SC，无需额外设置。
+
 ---
 
-## 8. Shell 配置
+## 10. Shell 配置
 
-### 8.1 Bash 别名
+### 10.1 Bash 别名
 
 `~/.bash_aliases` 会被 `~/.bashrc` 自动加载，用于存放自定义别名：
 
@@ -703,7 +795,7 @@ alias oc='opencode'
 EOF
 ```
 
-### 8.2 opencode 快捷配置
+### 10.2 opencode 快捷配置
 
 `~/.bashrc` 尾部已添加 PATH：
 
@@ -722,24 +814,27 @@ opencode 主配置文件 `~/.config/opencode/opencode.jsonc`：
 
 ---
 
-## 9. 附录：更改汇总
+## 11. 附录：更改汇总
 
 ### 所有修改的文件
 
 | 文件 | 操作 |
 |------|------|
 | `/etc/sysctl.d/99-swappiness.conf` | **新建** — swappiness 持久化 |
+| `/etc/sysctl.d/99-cache.conf` | **新建** — vfs_cache_pressure + NUMA 平衡 |
 | `/etc/default/zramswap` | **编辑** — 40% 容量 + zstd |
 | `/etc/profile.d/nvidia-vaapi-env.sh` | **编辑** — 移除 MOZ_DISABLE_RDD_SANDBOX |
 | `/etc/modprobe.d/nvidia-options.conf` | **编辑** — 启用 2 个电源管理选项 |
+| `/etc/systemd/journald.conf` | **编辑** — SystemMaxUse=200M |
 | `~/.config/environment.d/10-fcitx5.conf` | **编辑** — 清空 CLUTTER_IM_MODULE |
 | `~/.config/fontconfig/fonts.conf` | **新建** — CJK 字体优先级 |
 | `~/.bash_aliases` | **新建** — 常用别名 |
 | `~/.config/autostart/org.gnome.Evolution-alarm-notify.desktop` | **新建** — 隐藏 Evolution 提醒 |
 
-### 所有 mask 的服务
+### 所有 mask / disable 的服务
 
 ```bash
+# user services — mask
 evolution-addressbook-factory.service
 evolution-calendar-factory.service
 evolution-source-registry.service
@@ -748,21 +843,29 @@ app-geoclue-demo-agent@autostart.service
 at-spi-dbus-bus.service
 app-polkit-mate-authentication-agent-1@autostart.service
 app-pika-welcome-autostart@autostart.service
+hypridle
+
+# system services — disable
+brltty
+avahi-daemon
+rsyslog
 ```
 
 ### 需重新登录生效的更改
 
-- `~/.config/environment.d/` — 环境变量（section 4.5, systemd user session）
-- systemd `--user mask` — 服务禁用（section 2）
-- `~/.config/fontconfig/` — 新应用立即生效，已有应用需重启（section 7）
-- `~/.bash_aliases` — 新 shell 自动加载（section 8）
+- `~/.config/environment.d/` — 环境变量（section 6.5, systemd user session）
+- systemd `--user mask` — 服务禁用（section 3）
+- `~/.config/fontconfig/` — 新应用立即生效，已有应用需重启（section 9）
+- `~/.bash_aliases` — 新 shell 自动加载（section 10）
 
 ### 需重启系统生效的更改
 
 - `/etc/sysctl.d/99-swappiness.conf` — 已在运行期间立即生效，重启后持久化
+- `/etc/sysctl.d/99-cache.conf` — 已在运行期间立即生效，重启后持久化
 - `/etc/default/zramswap` — 已重启 zram 服务，重启系统后自动保持
 - `/etc/modprobe.d/nvidia-options.conf` — NVIDIA 模块参数，需重启加载
 - `update-initramfs` — 已生成新 initramfs，重启后生效
+- `/etc/systemd/journald.conf` — 已重启 journald 即时生效
 
 ---
 
